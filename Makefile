@@ -1,0 +1,2 @@
+upload:
+	@bash upload.sh

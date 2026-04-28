@@ -1,0 +1,12 @@
+{
+  "extension_identifier": "marketing_costs_saved",
+  "label": {
+    "en_US": "Marketing Costs Saved"
+  },
+  "position": "pim.activity.navigation.tab",
+  "file": "marketing-costs-saved.js",
+  "configuration": {},
+  "custom_variables": {
+    "enabled_metrics": "completeness,structuredAttributes,associations,assetCollections,assetFamilyTransformations"
+  }
+}
