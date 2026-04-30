@@ -20,8 +20,6 @@ export const CONFIG = {
   // API SETTINGS
   // ──────────────────────────────────────────────
   api: {
-    sampleMaxProducts: 1000,   // Hard ceiling on product sample size
-    samplePageSize: 100,       // Products per API page (Akeneo max = 100)
     maxAssetFamilyPages: 10,   // Max pages when paginating asset families
   },
 

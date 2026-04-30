@@ -4,41 +4,35 @@
  * Entry point for the Marketing Costs Saved Custom Component.
  * Position: pim.activity.navigation.tab
  *
- * At this position there is no product/category context — the component
- * calls PIM.api.* directly to fetch catalogue-wide data.
- *
  * Orchestration:
- *   1. Wait for window.PIM (polling with exponential backoff)
- *   2. Fetch attributes + product sample + asset families in parallel
- *   3. Calculate all 5 metrics (isolated — one failure won't block others)
- *   4. Render the dashboard
+ *   Phase 1 — fetch attributes + product families + asset families in parallel,
+ *              render shell with family dropdown
+ *   Phase 2 — fetch all products for the selected family, calculate all 5 metrics,
+ *              render results. Re-runs on every family change.
  */
 
 import { CONFIG } from './config.js';
 import { debugLog, debugError, debugTime, debugTimeEnd } from './utils/logger.js';
 import { fetchAssetFamilyList } from './data/fetchAssetFamilyList.js';
-import { calculate as calculateCompleteness }             from './metrics/completeness.js';
-import { calculate as calculateStructuredAttributes }      from './metrics/structuredAttributes.js';
-import { calculate as calculateAssociations }              from './metrics/associations.js';
-import { calculate as calculateAssetCollections }          from './metrics/assetCollections.js';
+import { calculate as calculateCompleteness }              from './metrics/completeness.js';
+import { calculate as calculateStructuredAttributes }       from './metrics/structuredAttributes.js';
+import { calculate as calculateAssociations }               from './metrics/associations.js';
+import { calculate as calculateAssetCollections }           from './metrics/assetCollections.js';
 import { calculate as calculateAssetFamilyTransformations } from './metrics/assetFamilyTransformations.js';
-import { renderDashboard, renderLoading, renderError } from './renderer/dashboard.js';
+import {
+  renderLoading,
+  renderError,
+  renderShell,
+  renderMetricsLoading,
+  renderMetrics,
+  renderMetricsError,
+} from './renderer/dashboard.js';
 
 // ── SDK Waiter ────────────────────────────────────────────────────────────────
 
-/**
- * Polls for window.PIM with exponential backoff.
- * Resolves once the SDK is available or rejects after timeoutMs.
- *
- * @param {number} [timeoutMs=10000]
- * @returns {Promise<Object>} The PIM SDK instance
- */
 function waitForPim(timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
-    if (window.PIM) {
-      resolve(window.PIM);
-      return;
-    }
+    if (window.PIM) { resolve(window.PIM); return; }
 
     const startTime = Date.now();
     let interval = 100;
@@ -50,12 +44,10 @@ function waitForPim(timeoutMs = 10_000) {
         return;
       }
       if (Date.now() - startTime >= timeoutMs) {
-        reject(
-          new Error(
-            `PIM SDK (window.PIM) was not available after ${timeoutMs / 1000}s. ` +
-            'Ensure this script is loaded within an Akeneo Custom Component context.'
-          )
-        );
+        reject(new Error(
+          `PIM SDK (window.PIM) was not available after ${timeoutMs / 1000}s. ` +
+          'Ensure this script is loaded within an Akeneo Custom Component context.'
+        ));
         return;
       }
       interval = Math.min(interval * 1.5, 500);
@@ -68,24 +60,16 @@ function waitForPim(timeoutMs = 10_000) {
 
 // ── Data Fetching ─────────────────────────────────────────────────────────────
 
-/**
- * Fetches all catalogue attributes using paginated attribute_v1.list().
- *
- * @returns {Promise<Array>} Flat array of all attribute objects
- */
 async function fetchAllAttributes() {
   debugTime('fetchAttributes');
   const all = [];
   let page = 1;
-  const limit = 100;
 
   while (true) {
-    const response = await globalThis.PIM.api.attribute_v1.list({ page, limit });
+    const response = await globalThis.PIM.api.attribute_v1.list({ page, limit: 100 });
     const items = response.items ?? [];
     all.push(...items);
-
-    debugLog('fetchAttributes', `Page ${page}: ${items.length} attrs (total so far: ${all.length})`);
-
+    debugLog('fetchAttributes', `Page ${page}: ${items.length} attrs (total: ${all.length})`);
     if (items.length === 0 || !response.links?.next) break;
     page++;
   }
@@ -95,50 +79,55 @@ async function fetchAllAttributes() {
   return all;
 }
 
-/**
- * Fetches a product sample with completeness data.
- * Capped at CONFIG.api.sampleMaxProducts.
- *
- * @returns {Promise<Array>} Flat array of sampled product objects
- */
-async function fetchProductSample() {
-  debugTime('fetchProducts');
+async function fetchAllFamilies() {
+  debugTime('fetchFamilies');
   const all = [];
   let page = 1;
-  const limit = CONFIG.api.samplePageSize;
-  const maxPages = CONFIG.api.sampleMaxProducts / limit;
 
-  while (page <= maxPages) {
+  while (true) {
+    const response = await globalThis.PIM.api.family_v1.list({ page, limit: 100 });
+    const items = response.items ?? [];
+    all.push(...items);
+    debugLog('fetchFamilies', `Page ${page}: ${items.length} families (total: ${all.length})`);
+    if (items.length === 0 || !response.links?.next) break;
+    page++;
+  }
+
+  debugTimeEnd('fetchFamilies');
+  debugLog('fetchFamilies', `Complete — ${all.length} families`);
+  return all;
+}
+
+async function fetchProductsByFamily(familyCode) {
+  debugTime('fetchProducts');
+  const searchFilter = familyCode === '__none__'
+    ? { family: [{ operator: 'EMPTY' }] }
+    : { family: [{ operator: 'IN', value: [familyCode] }] };
+
+  const all = [];
+  let page = 1;
+
+  while (true) {
     const response = await globalThis.PIM.api.product_uuid_v1.list({
+      search: searchFilter,
       page,
-      limit,
+      limit: 100,
       withCompletenesses: true,
     });
     const items = response.items ?? [];
     all.push(...items);
-
-    debugLog('fetchProducts', `Page ${page}/${maxPages}: ${items.length} products (total: ${all.length})`);
-
+    debugLog('fetchProducts', `Page ${page}: ${items.length} products (total: ${all.length})`);
     if (items.length === 0 || !response.links?.next) break;
     page++;
   }
 
   debugTimeEnd('fetchProducts');
-  debugLog('fetchProducts', `Complete — ${all.length} products`);
+  debugLog('fetchProducts', `Complete — ${all.length} products for family "${familyCode}"`);
   return all;
 }
 
 // ── Safe Metric Calculation ───────────────────────────────────────────────────
 
-/**
- * Wraps a metric calculate() call so that a single metric failure
- * does not prevent the remaining metrics from rendering.
- *
- * @param {Function} fn        - The calculate() function to invoke
- * @param {Object}   context   - The shared context object
- * @param {string}   metricKey - Key into CONFIG.metrics (used for error label)
- * @returns {Promise<Object|Array>} A metric result or error result
- */
 async function safeCalculate(fn, context, metricKey) {
   try {
     return await fn(context);
@@ -158,13 +147,6 @@ async function safeCalculate(fn, context, metricKey) {
 
 // ── Metric Visibility ─────────────────────────────────────────────────────────
 
-/**
- * Reads the `enabled_metrics` custom variable and returns a Set of valid keys.
- * Falls back to all keys if the variable is unset, empty, or all values are invalid.
- *
- * @param {string[]} allKeys - All known metric keys for this component
- * @returns {Set<string>}
- */
 function getEnabledMetrics(allKeys) {
   try {
     const vars = globalThis.PIM.custom_variables ?? {};
@@ -183,60 +165,42 @@ function getEnabledMetrics(allKeys) {
   return new Set(allKeys);
 }
 
-// ── Main Orchestration ────────────────────────────────────────────────────────
+// ── Phase 2: Fetch products + calculate + render metrics ──────────────────────
 
-/**
- * Fetches data, calculates all 5 metrics, and renders the dashboard.
- *
- * @param {HTMLElement} container - The DOM element to render into
- */
-async function run(container) {
-  renderLoading(container);
+async function runMetrics(metricsArea, { attributes, families, assetFamilies, assetFamiliesFetchDebug, familyCode }) {
+  renderMetricsLoading(metricsArea);
+
+  const userLocale = globalThis.PIM.context?.user?.catalog_locale ?? 'en_US';
+  const family = families.find(f => f.code === familyCode);
+  const familyLabel = familyCode === '__none__'
+    ? 'No family'
+    : (family?.labels?.[userLocale] ?? family?.labels?.['en_US'] ?? familyCode);
 
   const timings = {};
   const t0 = Date.now();
 
-  // ── Phase 1: Fetch attributes, products, and asset families in parallel ──
-  let attributes, products, assetFamilies, assetFamiliesFetchDebug;
+  let products;
   try {
-    debugTime('fetchAll');
     const t1 = Date.now();
-    const [attrResult, prodResult, afResult] = await Promise.all([
-      fetchAllAttributes(),
-      fetchProductSample(),
-      fetchAssetFamilyList(),
-    ]);
-    attributes = attrResult;
-    products = prodResult;
-    assetFamilies = afResult.families;
-    assetFamiliesFetchDebug = afResult.fetchDebug;
+    products = await fetchProductsByFamily(familyCode);
     timings.fetch = Date.now() - t1;
-    debugTimeEnd('fetchAll');
   } catch (err) {
-    debugError('main.fetch', err);
-    renderError(container, `Failed to load data from PIM: ${err.message}`);
+    debugError('runMetrics.fetch', err);
+    renderMetricsError(metricsArea, err.message);
     return;
   }
-
-  if (attributes.length === 0) {
-    renderError(container, 'No attributes found in this PIM instance. Cannot calculate metrics.');
-    return;
-  }
-
-  if (products.length === 0) {
-    renderError(container, 'No products found in this PIM instance. Cannot calculate metrics.');
-    return;
-  }
-
-  debugLog('main', {
-    attributesFetched: attributes.length,
-    productsFetched: products.length,
-    assetFamiliesFetched: assetFamilies.length,
-  });
 
   const context = { products, attributes, assetFamilies };
 
-  // ── Phase 2: Calculate all 5 metrics (failures isolated per metric) ──
+  const ALL_KEYS = [
+    'completeness',
+    'structuredAttributes',
+    'associations',
+    'assetCollections',
+    'assetFamilyTransformations',
+  ];
+  const enabledKeys = getEnabledMetrics(ALL_KEYS);
+
   const t2 = Date.now();
   const [
     completenessResults,
@@ -253,25 +217,12 @@ async function run(container) {
   ]);
   timings.calculate = Date.now() - t2;
 
-  // completenessResults is an array; safeCalculate wraps it as-is.
-  // If calculate() threw, we get a single error object — normalise to array.
   const safeCompletenessResults = Array.isArray(completenessResults)
     ? completenessResults
     : [completenessResults];
 
-  // ── Phase 3: Determine which metrics to show ──
-  const ALL_KEYS = [
-    'completeness',
-    'structuredAttributes',
-    'associations',
-    'assetCollections',
-    'assetFamilyTransformations',
-  ];
-  const enabledKeys = getEnabledMetrics(ALL_KEYS);
-
-  // ── Phase 4: Render ──
   const t3 = Date.now();
-  renderDashboard(container, {
+  renderMetrics(metricsArea, {
     completenessResults: safeCompletenessResults,
     structuredAttributesResult,
     associationsResult,
@@ -279,12 +230,13 @@ async function run(container) {
     assetFamilyTransformationsResult,
     assetFamiliesFetchDebug,
     productCount: products.length,
+    familyLabel,
     attributeCount: attributes.length,
     assetFamilyCount: assetFamilies.length,
-    showCompleteness:             enabledKeys.has('completeness'),
-    showStructuredAttributes:     enabledKeys.has('structuredAttributes'),
-    showAssociations:             enabledKeys.has('associations'),
-    showAssetCollections:         enabledKeys.has('assetCollections'),
+    showCompleteness:              enabledKeys.has('completeness'),
+    showStructuredAttributes:      enabledKeys.has('structuredAttributes'),
+    showAssociations:              enabledKeys.has('associations'),
+    showAssetCollections:          enabledKeys.has('assetCollections'),
     showAssetFamilyTransformations: enabledKeys.has('assetFamilyTransformations'),
     timings,
     config: CONFIG,
@@ -292,15 +244,60 @@ async function run(container) {
   timings.render = Date.now() - t3;
   timings.total  = Date.now() - t0;
 
-  debugLog('main.timings', timings);
+  debugLog('runMetrics.timings', { familyCode, ...timings });
+}
+
+// ── Phase 1: Fetch schema + render shell ──────────────────────────────────────
+
+async function run(container) {
+  renderLoading(container);
+
+  let attributes, families, assetFamilies, assetFamiliesFetchDebug;
+  try {
+    debugTime('fetchSchema');
+    const [attrResult, famResult, afResult] = await Promise.all([
+      fetchAllAttributes(),
+      fetchAllFamilies(),
+      fetchAssetFamilyList(),
+    ]);
+    attributes = attrResult;
+    families   = famResult;
+    assetFamilies = afResult.families;
+    assetFamiliesFetchDebug = afResult.fetchDebug;
+    debugTimeEnd('fetchSchema');
+  } catch (err) {
+    debugError('run.fetch', err);
+    renderError(container, `Failed to load catalogue data: ${err.message}`);
+    return;
+  }
+
+  if (attributes.length === 0) {
+    renderError(container, 'No attributes found in this PIM instance. Cannot calculate metrics.');
+    return;
+  }
+
+  debugLog('run', {
+    attributesFetched: attributes.length,
+    familiesFetched: families.length,
+    assetFamiliesFetched: assetFamilies.length,
+  });
+
+  const userLocale = globalThis.PIM.context?.user?.catalog_locale ?? 'en_US';
+
+  const { metricsArea, defaultFamilyCode } = renderShell(container, {
+    families,
+    userLocale,
+    config: CONFIG,
+    onFamilyChange: (familyCode) => {
+      runMetrics(metricsArea, { attributes, families, assetFamilies, assetFamiliesFetchDebug, familyCode });
+    },
+  });
+
+  await runMetrics(metricsArea, { attributes, families, assetFamilies, assetFamiliesFetchDebug, familyCode: defaultFamilyCode });
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-/**
- * Initialises the component: ensures the root container exists,
- * waits for the PIM SDK, then runs the main orchestration.
- */
 async function init() {
   if (!document.getElementById('root')) {
     document.body.innerHTML = '<div id="root"></div>';
@@ -312,7 +309,8 @@ async function init() {
     await run(container);
   } catch (err) {
     debugError('main.init', err);
-    renderError(container, err.message);
+    const c = document.getElementById('root');
+    if (c) renderError(c, err.message);
   }
 }
 
