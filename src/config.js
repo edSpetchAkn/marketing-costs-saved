@@ -14,7 +14,7 @@ export const CONFIG = {
   // ──────────────────────────────────────────────
   // DEBUG — set to false before client handover
   // ──────────────────────────────────────────────
-  debugMode: true,
+  debugMode: false,
 
   // ──────────────────────────────────────────────
   // API SETTINGS
