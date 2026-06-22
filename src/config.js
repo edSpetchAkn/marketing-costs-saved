@@ -90,6 +90,7 @@ export const CONFIG = {
   metrics: {
     completeness: {
       key: 'completeness',
+      pillar: 'Data Model',
       label: '% of Products with 100% Completeness per Channel',
       description: 'What percentage of your products have achieved full completeness across each active channel?',
       thresholds: { red: 50, amber: 70, green: 90 },
@@ -101,6 +102,7 @@ export const CONFIG = {
 
     structuredAttributes: {
       key: 'structuredAttributes',
+      pillar: 'Data Model',
       label: '% of Attributes that are Structured Types',
       description: 'What proportion of your data model uses structured attribute types (dates, identifiers, measurements, numbers, selects, prices, reference entities, tables, booleans)?',
       thresholds: { red: 30, amber: 50, green: 70 },
@@ -112,6 +114,7 @@ export const CONFIG = {
 
     associations: {
       key: 'associations',
+      pillar: 'Data Model',
       label: '% of Products with Product Link / Association Populated',
       description: 'What percentage of your products have at least one product association or product link defined?',
       thresholds: { red: 30, amber: 50, green: 70 },
@@ -123,6 +126,7 @@ export const CONFIG = {
 
     assetCollections: {
       key: 'assetCollections',
+      pillar: 'Data Model',
       label: '% of Products with Asset Collection Attribute Populated',
       description: 'What percentage of your products have at least one asset collection attribute with content?',
       thresholds: { red: 50, amber: 80, green: 100 },
@@ -134,6 +138,7 @@ export const CONFIG = {
 
     assetFamilyTransformations: {
       key: 'assetFamilyTransformations',
+      pillar: 'Automation',
       label: '% of Asset Families with Transformations or Product Link Rules',
       description: 'What percentage of your asset families have auto-transformations or product link rules configured?',
       thresholds: { red: 50, amber: 80, green: 100 },
