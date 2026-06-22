@@ -13,12 +13,17 @@
 
 import { CONFIG } from './config.js';
 import { debugLog, debugError, debugTime, debugTimeEnd } from './utils/logger.js';
-import { fetchAssetFamilyList } from './data/fetchAssetFamilyList.js';
-import { calculate as calculateCompleteness }              from './metrics/completeness.js';
-import { calculate as calculateStructuredAttributes }       from './metrics/structuredAttributes.js';
-import { calculate as calculateAssociations }               from './metrics/associations.js';
-import { calculate as calculateAssetCollections }           from './metrics/assetCollections.js';
-import { calculate as calculateAssetFamilyTransformations } from './metrics/assetFamilyTransformations.js';
+import {
+  fetchProducts,
+  fetchAttributes,
+  fetchFamilies,
+  fetchAssetFamilies,
+  calculateCompleteness,
+  calculateStructuredAttributeTypes,
+  calculateAssociations,
+  calculateAssetCollections,
+  calculateAssetFamilyTransformations,
+} from '@akeneo/maturity-metrics';
 import {
   renderLoading,
   renderError,
@@ -58,90 +63,11 @@ function waitForPim(timeoutMs = 10_000) {
   });
 }
 
-// ── Data Fetching ─────────────────────────────────────────────────────────────
-
-async function fetchAllAttributes() {
-  debugTime('fetchAttributes');
-  const all = [];
-  let page = 1;
-
-  while (true) {
-    const response = await globalThis.PIM.api.attribute_v1.list({ page, limit: 100 });
-    const items = response.items ?? [];
-    all.push(...items);
-    debugLog('fetchAttributes', `Page ${page}: ${items.length} attrs (total: ${all.length})`);
-    if (items.length === 0 || !response.links?.next) break;
-    page++;
-  }
-
-  debugTimeEnd('fetchAttributes');
-  debugLog('fetchAttributes', `Complete — ${all.length} attributes`);
-  return all;
-}
-
-async function fetchAllFamilies() {
-  debugTime('fetchFamilies');
-  const all = [];
-  let page = 1;
-
-  while (true) {
-    const response = await globalThis.PIM.api.family_v1.list({ page, limit: 100 });
-    const items = response.items ?? [];
-    all.push(...items);
-    debugLog('fetchFamilies', `Page ${page}: ${items.length} families (total: ${all.length})`);
-    if (items.length === 0 || !response.links?.next) break;
-    page++;
-  }
-
-  debugTimeEnd('fetchFamilies');
-  debugLog('fetchFamilies', `Complete — ${all.length} families`);
-  return all;
-}
-
-async function fetchProductsByFamily(familyCode) {
-  debugTime('fetchProducts');
-  const searchFilter = familyCode === '__none__'
-    ? { family: [{ operator: 'EMPTY' }] }
-    : { family: [{ operator: 'IN', value: [familyCode] }] };
-
-  const all = [];
-  let page = 1;
-  let useCompletenesses = true;
-  let stringifySearch = false;
-
-  while (true) {
-    let response;
-    try {
-      response = await globalThis.PIM.api.product_uuid_v1.list({
-        search: stringifySearch ? JSON.stringify(searchFilter) : searchFilter,
-        page,
-        limit: 100,
-        ...(useCompletenesses && { withCompletenesses: true }),
-      });
-    } catch (err) {
-      if (/422/.test(err?.message ?? '')) {
-        if (useCompletenesses) { useCompletenesses = false; continue; }
-        if (!stringifySearch)  { stringifySearch = true;   continue; }
-      }
-      throw err;
-    }
-    const items = response.items ?? [];
-    all.push(...items);
-    debugLog('fetchProducts', `Page ${page}: ${items.length} products (total: ${all.length})`);
-    if (items.length === 0 || !response.links?.next) break;
-    page++;
-  }
-
-  debugTimeEnd('fetchProducts');
-  debugLog('fetchProducts', `Complete — ${all.length} products for family "${familyCode}"`);
-  return all;
-}
-
 // ── Safe Metric Calculation ───────────────────────────────────────────────────
 
-async function safeCalculate(fn, context, metricKey) {
+async function safeMetric(metricKey, fn) {
   try {
-    return await fn(context);
+    return await fn();
   } catch (err) {
     debugError(`metric.${metricKey}`, err);
     return {
@@ -193,15 +119,13 @@ async function runMetrics(metricsArea, { attributes, families, assetFamilies, as
   let products;
   try {
     const t1 = Date.now();
-    products = await fetchProductsByFamily(familyCode);
+    products = await fetchProducts(familyCode);
     timings.fetch = Date.now() - t1;
   } catch (err) {
     debugError('runMetrics.fetch', err);
     renderMetricsError(metricsArea, err.message);
     return;
   }
-
-  const context = { products, attributes, assetFamilies };
 
   const ALL_KEYS = [
     'completeness',
@@ -220,11 +144,11 @@ async function runMetrics(metricsArea, { attributes, families, assetFamilies, as
     assetCollectionsResult,
     assetFamilyTransformationsResult,
   ] = await Promise.all([
-    safeCalculate(calculateCompleteness,             context, 'completeness'),
-    safeCalculate(calculateStructuredAttributes,      context, 'structuredAttributes'),
-    safeCalculate(calculateAssociations,              context, 'associations'),
-    safeCalculate(calculateAssetCollections,          context, 'assetCollections'),
-    safeCalculate(calculateAssetFamilyTransformations, context, 'assetFamilyTransformations'),
+    safeMetric('completeness', () => calculateCompleteness(products)),
+    safeMetric('structuredAttributes', () => calculateStructuredAttributeTypes(attributes, { structuredAttributeTypes: CONFIG.structuredAttributeTypes })),
+    safeMetric('associations', () => calculateAssociations(products, attributes, { productLinkAttributeTypes: CONFIG.productLinkAttributeTypes })),
+    safeMetric('assetCollections', () => calculateAssetCollections(products, attributes, { assetCollectionAttributeType: CONFIG.assetCollectionAttributeType })),
+    safeMetric('assetFamilyTransformations', () => calculateAssetFamilyTransformations(assetFamilies)),
   ]);
   timings.calculate = Date.now() - t2;
 
@@ -244,10 +168,10 @@ async function runMetrics(metricsArea, { attributes, families, assetFamilies, as
     familyLabel,
     attributeCount: attributes.length,
     assetFamilyCount: assetFamilies.length,
-    showCompleteness:              enabledKeys.has('completeness'),
-    showStructuredAttributes:      enabledKeys.has('structuredAttributes'),
-    showAssociations:              enabledKeys.has('associations'),
-    showAssetCollections:          enabledKeys.has('assetCollections'),
+    showCompleteness:               enabledKeys.has('completeness'),
+    showStructuredAttributes:       enabledKeys.has('structuredAttributes'),
+    showAssociations:               enabledKeys.has('associations'),
+    showAssetCollections:           enabledKeys.has('assetCollections'),
     showAssetFamilyTransformations: enabledKeys.has('assetFamilyTransformations'),
     timings,
     config: CONFIG,
@@ -267,9 +191,9 @@ async function run(container) {
   try {
     debugTime('fetchSchema');
     const [attrResult, famResult, afResult] = await Promise.all([
-      fetchAllAttributes(),
-      fetchAllFamilies(),
-      fetchAssetFamilyList(),
+      fetchAttributes(),
+      fetchFamilies(),
+      fetchAssetFamilies(),
     ]);
     attributes = attrResult;
     families   = famResult;
